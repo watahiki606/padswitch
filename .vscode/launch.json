@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:padswitch}",
+            "name": "Debug padswitch-cli",
+            "target": "padswitch-cli",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug padswitch-cli"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:padswitch}",
+            "name": "Release padswitch-cli",
+            "target": "padswitch-cli",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release padswitch-cli"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:padswitch}",
+            "name": "Debug PadSwitchApp",
+            "target": "PadSwitchApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug PadSwitchApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:padswitch}",
+            "name": "Release PadSwitchApp",
+            "target": "PadSwitchApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release PadSwitchApp"
+        }
+    ]
+}
