@@ -34,6 +34,14 @@ cp -R build/PadSwitch.app /Applications/
 swift build && swift test                  # 開発ビルド + テスト
 ```
 
+### リリース
+
+Developer ID 署名と公証を行い、配布用の zip を作る。初回に必要な証明書と認証情報の準備はスクリプト冒頭のコメントを参照。
+
+```sh
+Scripts/release.sh                         # build/PadSwitch-<version>.zip を作成
+```
+
 ## 仕組み
 
 Magic Trackpad はペアリング情報を1台分しか保持せず、待機中は無線でのペアリング要求も受け付けない。ただし、**接続中にペアリングを解除するとトラックパッドに解除が伝わり、発見可能モードに入る**。切り替えはこの性質を使う。
