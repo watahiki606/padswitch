@@ -1,0 +1,58 @@
+# v* タグの push で署名・公証済みの zip をビルドし、GitHub Release を作成する
+#
+# 必要な Secrets (gh secret set <NAME> で登録):
+#   MACOS_CERTIFICATE_P12      Developer ID Application 証明書を p12 で書き出して base64 にしたもの
+#   MACOS_CERTIFICATE_PASSWORD p12 書き出し時に設定したパスワード
+#   NOTARY_APPLE_ID            Apple Developer Program の Apple アカウント
+#   NOTARY_PASSWORD            app-specific password
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 署名用証明書を一時キーチェーンにインポート
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" \
+            -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: バージョンをタグに合わせる
+        run: |
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleShortVersionString ${GITHUB_REF_NAME#v}" \
+            -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" \
+            Support/Info.plist
+
+      - name: ビルド・署名・公証
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: L3VU6Q2MZ6
+        run: Scripts/release.sh
+
+      - name: GitHub Release を作成
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" build/PadSwitch-*.zip --generate-notes

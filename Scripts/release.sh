@@ -9,6 +9,9 @@
 #      xcrun notarytool store-credentials padswitch-notary \
 #        --apple-id <Apple ID> --team-id <Team ID>
 #      パスワードには https://account.apple.com で発行した app-specific password を使う
+#
+# CI ではキーチェーンの代わりに NOTARY_APPLE_ID / NOTARY_PASSWORD / NOTARY_TEAM_ID
+# の環境変数で認証情報を渡せる
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -29,10 +32,16 @@ APP="build/PadSwitch.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 ZIP="build/PadSwitch-${VERSION}.zip"
 
+if [ -n "${NOTARY_APPLE_ID:-}" ]; then
+    NOTARY_AUTH=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$NOTARY_TEAM_ID")
+else
+    NOTARY_AUTH=(--keychain-profile "$PROFILE")
+fi
+
 echo "==> 公証を申請 (完了まで数分待つ)"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
+xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
 
 echo "==> チケットを .app に添付して zip を作り直し"
 xcrun stapler staple "$APP"
