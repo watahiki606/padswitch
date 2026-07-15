@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Foundation
 import PadSwitchCore
 
@@ -6,15 +7,17 @@ import PadSwitchCore
 //
 // 終了コード: 0=成功, 1=エラー, 2=使い方誤り, 3=(status) 未接続
 
-let version = "1.0.0"
+let version = "1.1.0"
 
 func usage() -> Never {
     let text = """
     usage:
       padswitch-cli list [--json]        ペアリング済みデバイス一覧(トラックパッド優先)
       padswitch-cli status <address>     接続状態 (exit 0=接続中, 3=未接続)
-      padswitch-cli connect <address>    接続 (確認できるまで待つ)
+      padswitch-cli connect <address>    接続 (必要なら自動でペアリング)
+      padswitch-cli pair <address>       ペアリングし直す
       padswitch-cli disconnect <address> 切断
+      padswitch-cli selfcheck            Bluetooth権限とペアリング一覧を表示
       padswitch-cli version
     """
     FileHandle.standardError.write(Data((text + "\n").utf8))
@@ -33,6 +36,20 @@ guard let command = args.first else { usage() }
 switch command {
 case "version":
     print(version)
+
+case "selfcheck":
+    // TCCの許可がないとペアリング一覧はエラーではなく空で返るため、権限状態を明示的に出力する
+    let authText: String
+    switch CBManager.authorization {
+    case .allowedAlways: authText = "allowed"
+    case .denied: authText = "denied"
+    case .restricted: authText = "restricted"
+    default: authText = "notDetermined"
+    }
+    print("bluetooth-authorization: \(authText)")
+    for device in BluetoothController.pairedDevices() {
+        print("paired: \(device.address) \(device.name)")
+    }
 
 case "list":
     let devices = BluetoothController.pairedDevices()
@@ -70,6 +87,34 @@ case "connect":
     do {
         try BluetoothController.connect(args[1])
         print("connected")
+    } catch {
+        fail(error)
+    }
+
+case "pair":
+    guard args.count >= 2 else { usage() }
+    do {
+        try BluetoothController.pair(args[1])
+        print("paired")
+    } catch {
+        fail(error)
+    }
+
+case "release":
+    guard args.count >= 2 else { usage() }
+    do {
+        try BluetoothController.release(args[1])
+        print("released")
+    } catch {
+        fail(error)
+    }
+
+case "discover":
+    do {
+        for device in try BluetoothController.discover() {
+            print("found: \(device.address) \(device.name)")
+        }
+        print("done")
     } catch {
         fail(error)
     }

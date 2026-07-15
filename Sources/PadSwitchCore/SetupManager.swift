@@ -90,15 +90,38 @@ public enum SetupManager {
         }
     }
 
-    /// 相手 Mac 上で padswitch-cli が Bluetooth を操作できるか確認する。
-    public static func remoteCheck(_ remote: SSHRemoteEndpoint) async throws -> String {
-        let result = try await remote.run("cli list", timeout: 15)
+    /// 相手 Mac 上で padswitch-cli が Bluetooth を操作できるかを確認する。
+    /// TCC の許可がない場合、ペアリング一覧はエラーではなく空で返るため、権限状態を明示的に確認する。
+    public static func remoteCheck(_ remote: SSHRemoteEndpoint, deviceAddress: String?) async throws -> String {
+        let result = try await remote.run("cli selfcheck", timeout: 15)
+        if result.exitCode == 2 {
+            throw PadError.commandFailed("相手Macのプログラムが古いバージョンです。③を再実行して更新してください。")
+        }
         guard result.exitCode == 0 else {
+            throw PadError.commandFailed("相手Macでの確認に失敗しました。詳細: \(result.stderrTrimmed)")
+        }
+
+        let lines = result.stdoutTrimmed.components(separatedBy: "\n")
+        let authorization = lines.first { $0.hasPrefix("bluetooth-authorization:") }?
+            .replacingOccurrences(of: "bluetooth-authorization:", with: "")
+            .trimmingCharacters(in: .whitespaces) ?? "unknown"
+        guard authorization == "allowed" else {
             throw PadError.commandFailed(
-                "相手MacでのBluetooth操作に失敗しました。相手Macの「システム設定 > プライバシーとセキュリティ > Bluetooth」で sshd(または sshd-keygen-wrapper)を許可してください。詳細: \(result.stderrTrimmed)"
+                "相手MacでBluetoothの使用が許可されていません(状態: \(authorization))。相手Macの「システム設定 > プライバシーとセキュリティ > Bluetooth」を開き、「+」から /usr/libexec/sshd-keygen-wrapper を追加して許可してください。Finderでは ⌘⇧G でこのパスを入力できます。"
             )
         }
-        return result.stdoutTrimmed
+
+        let pairedAddresses = lines.filter { $0.hasPrefix("paired:") }
+            .compactMap { $0.components(separatedBy: " ").dropFirst().first?.lowercased() }
+        guard let address = deviceAddress, !address.isEmpty else {
+            return "Bluetooth操作OK。ペアリング済みデバイスは \(pairedAddresses.count) 台です。"
+        }
+        let normalized = address.replacingOccurrences(of: ":", with: "-").lowercased()
+        if pairedAddresses.contains(normalized) {
+            return "OK。トラックパッドは現在相手Mac側にあります。"
+        }
+        // ペアリングは切り替えのたびに受け取る側が自動で行うため、未登録で正常
+        return "OK。相手MacでBluetoothを操作できます。"
     }
 
     /// アプリバンドルに同梱された padswitch-cli の場所。

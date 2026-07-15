@@ -29,7 +29,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 560)
-        .frame(minHeight: 640)
+        .frame(minHeight: 760)
         .task {
             reloadDevices()
             launchAtLogin = state.launchAtLogin
@@ -59,7 +59,7 @@ struct SettingsView: View {
         } header: {
             Text("ステップ1: トラックパッドを選ぶ")
         } footer: {
-            Text("前提: トラックパッドは両方のMacに一度ずつUSB-Cケーブルで接続し、ペアリングを済ませておいてください(初回のみ)。")
+            Text("このMacとペアリング済みのデバイスが一覧に表示されます。相手Macへは切り替え時に自動でペアリングされます。")
         }
     }
 
@@ -67,12 +67,28 @@ struct SettingsView: View {
 
     private var remoteSection: some View {
         Section {
-            TextField("ホスト名 / IPアドレス", text: $state.remoteHost, prompt: Text("例: MacBook-Pro.local"))
-                .autocorrectionDisabled()
-            TextField("ユーザー名", text: $state.remoteUser, prompt: Text("相手Macのログインユーザー名"))
-                .autocorrectionDisabled()
+            VStack(alignment: .leading, spacing: 4) {
+                TextField("ホスト名 / IPアドレス", text: $state.remoteHost, prompt: Text("例: MacBook-Pro.local"))
+                    .autocorrectionDisabled()
+                Text("相手Macで「システム設定 > 一般 > 共有」を開くと、いちばん下に「◯◯◯.local」という名前が表示されます。それがホスト名です。リモートログインをONにする画面と同じ場所で確認できます。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                TextField("ユーザー名", text: $state.remoteUser, prompt: Text("相手Macのログインユーザー名"))
+                    .autocorrectionDisabled()
+                Text("相手Macにログインするときのアカウント名です。相手Macのターミナルで whoami を実行すると確認できます。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
-            stepRow(number: "①", title: "セットアップコマンドをコピー", step: copyStep, buttonTitle: "コピー") {
+            stepRow(
+                number: "①",
+                title: "セットアップコマンドをコピー",
+                help: "切り替えの受け口を相手Macに作るコマンドをコピーします。この Mac のターミナルに貼り付けて実行してください。実行すると相手Macのログインパスワードを1回だけ求められます。",
+                step: copyStep,
+                buttonTitle: "コピー"
+            ) {
                 await runStep(into: { copyStep = $0 }) {
                     try await SetupManager.ensureKeyPair()
                     let command = try SetupManager.setupCommand(user: state.remoteUser, host: state.remoteHost)
@@ -82,13 +98,25 @@ struct SettingsView: View {
                     return "コピーしました。ターミナル.app に貼り付けて実行し、相手Macのパスワードを入力してください(初回のみ)"
                 }
             }
-            stepRow(number: "②", title: "接続テスト", step: pingStep, buttonTitle: "テスト") {
+            stepRow(
+                number: "②",
+                title: "接続テスト",
+                help: "①のコマンドで作った受け口に、このアプリから接続できるか確認します。",
+                step: pingStep,
+                buttonTitle: "テスト"
+            ) {
                 await runStep(into: { pingStep = $0 }) {
                     try await SetupManager.ping(AppSettings.makeRemoteEndpoint())
                     return "SSH接続OK"
                 }
             }
-            stepRow(number: "③", title: "切り替え用CLIを相手Macに配置", step: deployStep, buttonTitle: "配置") {
+            stepRow(
+                number: "③",
+                title: "切り替え用プログラムを相手Macに配置",
+                help: "トラックパッドの接続と切断を行う小さなプログラムを相手Macへ送ります。",
+                step: deployStep,
+                buttonTitle: "配置"
+            ) {
                 await runStep(into: { deployStep = $0 }) {
                     guard let cliURL = SetupManager.bundledCLIURL() else {
                         throw PadError.notConfigured("同梱のpadswitch-cliが見つかりません(アプリを.appとしてビルドしてください)")
@@ -97,13 +125,15 @@ struct SettingsView: View {
                     return "配置しました"
                 }
             }
-            stepRow(number: "④", title: "相手MacのBluetooth動作確認", step: checkStep, buttonTitle: "確認") {
+            stepRow(
+                number: "④",
+                title: "相手MacのBluetooth動作確認",
+                help: "配置したプログラムが相手MacでBluetoothを操作できるか確認します。",
+                step: checkStep,
+                buttonTitle: "確認"
+            ) {
                 await runStep(into: { checkStep = $0 }) {
-                    let list = try await SetupManager.remoteCheck(AppSettings.makeRemoteEndpoint())
-                    let paired = list.contains(state.deviceAddress)
-                        ? "OK(トラックパッドは相手Macにもペアリング済み)"
-                        : "動作OK。ただし選択中のトラックパッドが相手Macにペアリングされていません。ケーブルで一度接続してください"
-                    return paired
+                    try await SetupManager.remoteCheck(AppSettings.makeRemoteEndpoint(), deviceAddress: state.deviceAddress)
                 }
             }
         } header: {
@@ -128,13 +158,21 @@ struct SettingsView: View {
                     }
                 }
 
-            stepRow(number: "⑤", title: "切り替えテスト(1回切り替えます)", step: testStep, buttonTitle: "実行") {
+            stepRow(
+                number: "⑤",
+                title: "切り替えテスト",
+                help: "いま接続している側から、もう一方のMacへ1回切り替えます。",
+                step: testStep,
+                buttonTitle: "実行"
+            ) {
                 await runStep(into: { testStep = $0 }) {
+                    let from = state.location == .here ? "このMac" : state.remoteHost
                     await state.toggle()
                     if let error = state.lastError {
                         throw PadError.commandFailed(error)
                     }
-                    return state.location == .here ? "このMacに接続しました" : "相手のMacに切り替えました"
+                    let to = state.location == .here ? "このMac" : state.remoteHost
+                    return "\(from) → \(to) に切り替えました"
                 }
             }
         } header: {
@@ -157,6 +195,7 @@ struct SettingsView: View {
     private func stepRow(
         number: String,
         title: String,
+        help: String? = nil,
         step: StepState,
         buttonTitle: String,
         action: @escaping () async -> Void
@@ -172,6 +211,11 @@ struct SettingsView: View {
                     Task { await action() }
                 }
                 .disabled(step == .running)
+            }
+            if let help {
+                Text(help)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
             switch step {
             case .ok(let message):

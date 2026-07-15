@@ -6,6 +6,10 @@ public protocol PadEndpoint: Sendable {
     func isConnected(_ address: String) async throws -> Bool
     func connect(_ address: String) async throws
     func disconnect(_ address: String) async throws
+    /// ペアリングする。トラックパッドが発見可能モードのときのみ成功する
+    func pair(_ address: String) async throws
+    /// 接続中にペアリング解除してトラックパッドを発見可能モードにする(切り替えの起点)
+    func release(_ address: String) async throws
 }
 
 /// この Mac 上での Bluetooth 操作。
@@ -24,6 +28,14 @@ public struct LocalEndpoint: PadEndpoint {
 
     public func disconnect(_ address: String) async throws {
         try await runBlocking { try BluetoothController.disconnect(address) }
+    }
+
+    public func pair(_ address: String) async throws {
+        try await runBlocking { try BluetoothController.pair(address) }
+    }
+
+    public func release(_ address: String) async throws {
+        try await runBlocking { try BluetoothController.release(address) }
     }
 
     private func runBlocking<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
@@ -90,7 +102,8 @@ public struct SSHRemoteEndpoint: PadEndpoint {
     }
 
     public func connect(_ address: String) async throws {
-        let result = try await run("cli connect \(address)", timeout: 25)
+        // 接続に失敗した場合は相手側で自動ペアリングが走るため、余裕を持たせる
+        let result = try await run("cli connect \(address)", timeout: 60)
         guard result.exitCode == 0 else {
             throw PadError.commandFailed("相手Macでの接続に失敗: \(result.stderrTrimmed)")
         }
@@ -100,6 +113,20 @@ public struct SSHRemoteEndpoint: PadEndpoint {
         let result = try await run("cli disconnect \(address)")
         guard result.exitCode == 0 else {
             throw PadError.commandFailed("相手Macでの切断に失敗: \(result.stderrTrimmed)")
+        }
+    }
+
+    public func pair(_ address: String) async throws {
+        let result = try await run("cli pair \(address)", timeout: 25)
+        guard result.exitCode == 0 else {
+            throw PadError.commandFailed("相手Macでのペアリングに失敗: \(result.stderrTrimmed)")
+        }
+    }
+
+    public func release(_ address: String) async throws {
+        let result = try await run("cli release \(address)", timeout: 20)
+        guard result.exitCode == 0 else {
+            throw PadError.commandFailed("相手Macでのペアリング解除に失敗: \(result.stderrTrimmed)")
         }
     }
 }

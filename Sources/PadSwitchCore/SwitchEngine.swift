@@ -28,7 +28,7 @@ public struct SwitchEngine: Sendable {
 
     public let local: any PadEndpoint
     public let remote: any PadEndpoint
-    public var connectRetries = 5
+    public var connectRetries = 4
     public var retryDelay: TimeInterval = 1.0
 
     public init(local: any PadEndpoint = LocalEndpoint(), remote: any PadEndpoint) {
@@ -56,52 +56,70 @@ public struct SwitchEngine: Sendable {
         }
     }
 
-    /// 渡す: ローカル切断 → 相手が接続(リトライ)。失敗したらローカルに接続し直して復旧。
+    /// 渡す: ローカルで接続中にペアリング解除(トラックパッドが発見可能になる)
+    /// → 相手がペアリングして接続(リトライ)。失敗したらローカルにペアリングし直して復旧。
+    ///
+    /// Magic Trackpad はペアリング情報を1台分しか保持せず、待機中はペアリング要求を
+    /// 受け付けない。接続中の解除だけが発見可能モードを誘発するため、この手順になる。
     public func handoff(_ address: String) async throws -> Location {
-        try await local.disconnect(address)
+        try await local.release(address)
 
-        var lastError: Error = PadError.timeout("相手のMacへの接続に失敗しました")
-        for attempt in 1...connectRetries {
-            do {
-                try await remote.connect(address)
-                if try await remote.isConnected(address) {
-                    return .away
-                }
-                lastError = PadError.timeout("相手のMacへの接続が確認できませんでした")
-            } catch let error as PadError {
-                // SSH 到達不可はリトライしても無駄なので即座に復旧へ
-                if case .unreachable = error {
-                    try? await local.connect(address)
-                    throw error
-                }
-                lastError = error
+        do {
+            try await pairAndConnect(on: remote, address: address)
+            return .away
+        } catch {
+            // 失敗してもトラックパッドはまだ発見可能なはずなので、こちらにペアリングし直す
+            let reason = describe(error)
+            if await recover(on: local, address: address) {
+                throw PadError.timeout("\(local.label) → \(remote.label) の切り替えに失敗したため、トラックパッドを \(local.label) に戻しました。原因: \(reason)")
             }
-            if attempt < connectRetries {
-                try? await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
-            }
+            throw PadError.timeout("\(local.label) → \(remote.label) の切り替えに失敗し、\(local.label) への再接続もできませんでした。トラックパッドの電源を入れ直してから「このMacに接続する」を実行してください。原因: \(reason)")
         }
-
-        // 相手が接続できなかった場合、トラックパッドが宙に浮かないよう取り戻す
-        try? await local.connect(address)
-        throw PadError.timeout("切り替えに失敗したため、トラックパッドをこのMacに戻しました (\((lastError as? PadError)?.errorDescription ?? String(describing: lastError)))")
     }
 
-    /// 取る: 相手が切断(到達不可なら無視して続行) → ローカル接続(リトライ)。
+    /// 取る: 相手がペアリング解除(到達不可なら発見可能モードを期待して続行)
+    /// → ローカルがペアリングして接続(リトライ)。失敗したら相手に戻して復旧。
     public func take(_ address: String) async throws -> Location {
+        var remoteReleased = true
         do {
-            try await remote.disconnect(address)
+            try await remote.release(address)
         } catch let error as PadError {
-            // 相手に到達できなくても、トラックパッドが空いていれば接続できるので続行する
-            if case .unreachable = error {} else { throw error }
+            // 相手に到達できなくても、トラックパッドが発見可能(電源入れ直し直後など)なら取れる
+            if case .unreachable = error {
+                remoteReleased = false
+            } else {
+                throw error
+            }
         }
 
-        var lastError: Error = PadError.timeout("トラックパッドに接続できませんでした")
+        do {
+            try await pairAndConnect(on: local, address: address)
+            return .here
+        } catch {
+            let reason = describe(error)
+            if remoteReleased, await recover(on: remote, address: address) {
+                throw PadError.timeout("\(remote.label) → \(local.label) の切り替えに失敗したため、トラックパッドを \(remote.label) に戻しました。原因: \(reason)")
+            }
+            throw PadError.timeout("\(remote.label) → \(local.label) の切り替えに失敗しました。トラックパッドの電源を入れ直してから、もう一度「このMacに接続する」を実行してください。原因: \(reason)")
+        }
+    }
+
+    /// ペアリング→接続→確認を検証付きでリトライする。
+    /// 解除直後の1回目のペアリングは失敗しやすいため、リトライが本質的に必要。
+    func pairAndConnect(on endpoint: any PadEndpoint, address: String) async throws {
+        var lastError: Error = PadError.timeout("\(endpoint.label) とペアリングできませんでした")
         for attempt in 1...connectRetries {
             do {
-                try await local.connect(address)
-                if try await local.isConnected(address) {
-                    return .here
+                try await endpoint.pair(address)
+                try await endpoint.connect(address)
+                if try await endpoint.isConnected(address) {
+                    return
                 }
+                lastError = PadError.timeout("\(endpoint.label) への接続が確認できませんでした")
+            } catch let error as PadError {
+                // SSH 到達不可はリトライしても無駄なので即座に中断
+                if case .unreachable = error { throw error }
+                lastError = error
             } catch {
                 lastError = error
             }
@@ -109,6 +127,15 @@ public struct SwitchEngine: Sendable {
                 try? await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
             }
         }
-        throw PadError.timeout("トラックパッドに接続できませんでした。電源と距離を確認してください (\((lastError as? PadError)?.errorDescription ?? String(describing: lastError)))")
+        throw lastError
+    }
+
+    /// 切り替え失敗後の復旧。指定側にペアリングし直す。
+    private func recover(on endpoint: any PadEndpoint, address: String) async -> Bool {
+        (try? await pairAndConnect(on: endpoint, address: address)) != nil
+    }
+
+    private func describe(_ error: Error) -> String {
+        (error as? PadError)?.errorDescription ?? String(describing: error)
     }
 }
