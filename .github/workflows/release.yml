@@ -5,6 +5,8 @@
 #   MACOS_CERTIFICATE_PASSWORD p12 書き出し時に設定したパスワード
 #   NOTARY_APPLE_ID            Apple Developer Program の Apple アカウント
 #   NOTARY_PASSWORD            app-specific password
+#   TAP_GITHUB_TOKEN           homebrew-tap リポジトリに contents:write 権限を持つ
+#                              fine-grained PAT (cask の自動更新に使用)
 name: Release
 
 on:
@@ -56,3 +58,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" build/PadSwitch-*.zip --generate-notes
+
+      - name: Homebrew tap の cask を更新
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: Scripts/update-cask.sh "${GITHUB_REF_NAME#v}" build/PadSwitch-*.zip
