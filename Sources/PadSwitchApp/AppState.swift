@@ -21,6 +21,7 @@ final class AppState: ObservableObject {
     @Published var location: SwitchEngine.Location?
     @Published var busy = false
     @Published var lastError: String?
+    @Published var progressText: String?
 
     private var refreshTimer: Timer?
     private var hotkey: Hotkey?
@@ -53,7 +54,7 @@ final class AppState: ObservableObject {
     var statusText: String {
         guard isConfigured else { return "未設定(設定を開いてください)" }
         let device = deviceName.isEmpty ? "トラックパッド" : deviceName
-        if busy { return "切り替え中…" }
+        if busy { return progressText ?? "切り替え中…" }
         switch location {
         case .here: return "\(device): このMacに接続中"
         case .away: return "\(device): \(remoteHost) に接続中"
@@ -103,9 +104,16 @@ final class AppState: ObservableObject {
             return
         }
         busy = true
-        defer { busy = false }
+        progressText = nil
+        defer {
+            busy = false
+            progressText = nil
+        }
         do {
-            let engine = try AppSettings.makeEngine()
+            var engine = try AppSettings.makeEngine()
+            engine.onProgress = { [weak self] message in
+                Task { @MainActor in self?.progressText = message }
+            }
             let newLocation = try await engine.toggle(deviceAddress)
             location = newLocation
             lastError = nil

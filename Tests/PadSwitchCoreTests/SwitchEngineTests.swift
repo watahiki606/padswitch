@@ -12,11 +12,14 @@ final class MockEndpoint: PadEndpoint, @unchecked Sendable {
     var connectFailuresRemaining = 0
     /// すべての呼び出しを unreachable にする
     var unreachable = false
+    /// 接続確認の再確認(stabilityCheckDelay後)で false を返す回数。瞬断の再現に使う
+    var flapsRemaining = 0
 
     private(set) var pairCalls = 0
     private(set) var connectCalls = 0
     private(set) var releaseCalls = 0
     private(set) var disconnectCalls = 0
+    private var checksSinceLastConnect = 0
 
     init(label: String, paired: Bool, connected: Bool) {
         self.label = label
@@ -30,6 +33,12 @@ final class MockEndpoint: PadEndpoint, @unchecked Sendable {
 
     func isConnected(_ address: String) async throws -> Bool {
         try checkReachable()
+        checksSinceLastConnect += 1
+        // 2回目の確認(安定性の再確認)を、指定回数だけ瞬断として false にする
+        if checksSinceLastConnect == 2, flapsRemaining > 0 {
+            flapsRemaining -= 1
+            connected = false
+        }
         return connected
     }
 
@@ -42,6 +51,7 @@ final class MockEndpoint: PadEndpoint, @unchecked Sendable {
         }
         guard paired else { throw PadError.commandFailed("未ペアリング(テスト)") }
         connected = true
+        checksSinceLastConnect = 0
     }
 
     func disconnect(_ address: String) async throws {
@@ -68,6 +78,12 @@ final class MockEndpoint: PadEndpoint, @unchecked Sendable {
     }
 }
 
+/// onProgress コールバックのメッセージを収集するテスト用ヘルパー。
+final class ProgressCollector: @unchecked Sendable {
+    private(set) var messages: [String] = []
+    func append(_ message: String) { messages.append(message) }
+}
+
 final class SwitchEngineTests: XCTestCase {
     let address = "aa-bb-cc-dd-ee-ff"
 
@@ -75,6 +91,7 @@ final class SwitchEngineTests: XCTestCase {
         var engine = SwitchEngine(local: local, remote: remote)
         engine.retryDelay = 0
         engine.connectRetries = 4
+        engine.stabilityCheckDelay = 0
         return engine
     }
 
@@ -203,6 +220,34 @@ final class SwitchEngineTests: XCTestCase {
         // 相手側にペアリングし直している
         XCTAssertTrue(remote.paired)
         XCTAssertTrue(remote.connected)
+    }
+
+    func testHandoffRetriesWhenConnectionFlapsAfterStabilityCheck() async throws {
+        // isConnected() が一度 true を返した直後に瞬断するケースを再現する
+        let local = MockEndpoint(label: "local", paired: true, connected: true)
+        let remote = MockEndpoint(label: "remote", paired: false, connected: false)
+        remote.flapsRemaining = 2
+        let engine = makeEngine(local: local, remote: remote)
+
+        let location = try await engine.handoff(address)
+
+        XCTAssertEqual(location, .away)
+        XCTAssertEqual(remote.pairCalls, 3)
+        XCTAssertTrue(remote.connected)
+    }
+
+    func testHandoffReportsProgress() async throws {
+        let local = MockEndpoint(label: "local", paired: true, connected: true)
+        let remote = MockEndpoint(label: "remote", paired: false, connected: false)
+        var engine = makeEngine(local: local, remote: remote)
+        let collector = ProgressCollector()
+        engine.onProgress = { collector.append($0) }
+
+        _ = try await engine.handoff(address)
+
+        XCTAssertTrue(collector.messages.contains { $0.contains("解除中") })
+        XCTAssertTrue(collector.messages.contains { $0.contains("ペアリング中") })
+        XCTAssertTrue(collector.messages.contains { $0.contains("確認しました") })
     }
 
     func testStatusNowhere() async throws {

@@ -28,12 +28,21 @@ public struct SwitchEngine: Sendable {
 
     public let local: any PadEndpoint
     public let remote: any PadEndpoint
-    public var connectRetries = 4
-    public var retryDelay: TimeInterval = 1.0
+    public var connectRetries = 6
+    public var retryDelay: TimeInterval = 0.5
+    /// 接続確認直後の瞬断を成功と誤判定しないための再確認までの待ち時間
+    public var stabilityCheckDelay: TimeInterval = 1.0
+    /// 切り替え中の進捗をリアルタイムに受け取るコールバック(UI表示用)
+    public var onProgress: (@Sendable (String) -> Void)?
 
     public init(local: any PadEndpoint = LocalEndpoint(), remote: any PadEndpoint) {
         self.local = local
         self.remote = remote
+    }
+
+    private func report(_ message: String) {
+        Log.switch.info("\(message, privacy: .public)")
+        onProgress?(message)
     }
 
     /// 現在どちらに接続しているか調べる。remote は問い合わせ失敗時 nil。
@@ -62,6 +71,7 @@ public struct SwitchEngine: Sendable {
     /// Magic Trackpad はペアリング情報を1台分しか保持せず、待機中はペアリング要求を
     /// 受け付けない。接続中の解除だけが発見可能モードを誘発するため、この手順になる。
     public func handoff(_ address: String) async throws -> Location {
+        report("\(local.label) の接続を解除中…")
         try await local.release(address)
 
         do {
@@ -70,6 +80,7 @@ public struct SwitchEngine: Sendable {
         } catch {
             // 失敗してもトラックパッドはまだ発見可能なはずなので、こちらにペアリングし直す
             let reason = describe(error)
+            report("\(remote.label) への切り替えに失敗したため、\(local.label) に戻しています…")
             if await recover(on: local, address: address) {
                 throw PadError.timeout("\(local.label) → \(remote.label) の切り替えに失敗したため、トラックパッドを \(local.label) に戻しました。原因: \(reason)")
             }
@@ -81,12 +92,14 @@ public struct SwitchEngine: Sendable {
     /// → ローカルがペアリングして接続(リトライ)。失敗したら相手に戻して復旧。
     public func take(_ address: String) async throws -> Location {
         var remoteReleased = true
+        report("\(remote.label) の接続を解除中…")
         do {
             try await remote.release(address)
         } catch let error as PadError {
             // 相手に到達できなくても、トラックパッドが発見可能(電源入れ直し直後など)なら取れる
             if case .unreachable = error {
                 remoteReleased = false
+                report("\(remote.label) に到達できないため、発見可能モードと仮定して続行します…")
             } else {
                 throw error
             }
@@ -97,8 +110,11 @@ public struct SwitchEngine: Sendable {
             return .here
         } catch {
             let reason = describe(error)
-            if remoteReleased, await recover(on: remote, address: address) {
-                throw PadError.timeout("\(remote.label) → \(local.label) の切り替えに失敗したため、トラックパッドを \(remote.label) に戻しました。原因: \(reason)")
+            if remoteReleased {
+                report("\(local.label) への切り替えに失敗したため、\(remote.label) に戻しています…")
+                if await recover(on: remote, address: address) {
+                    throw PadError.timeout("\(remote.label) → \(local.label) の切り替えに失敗したため、トラックパッドを \(remote.label) に戻しました。原因: \(reason)")
+                }
             }
             throw PadError.timeout("\(remote.label) → \(local.label) の切り替えに失敗しました。トラックパッドの電源を入れ直してから、もう一度「このMacに接続する」を実行してください。原因: \(reason)")
         }
@@ -106,16 +122,26 @@ public struct SwitchEngine: Sendable {
 
     /// ペアリング→接続→確認を検証付きでリトライする。
     /// 解除直後の1回目のペアリングは失敗しやすいため、リトライが本質的に必要。
+    /// 接続確認は一度 true が出ても、瞬断していないか少し待ってから再確認する。
     func pairAndConnect(on endpoint: any PadEndpoint, address: String) async throws {
         var lastError: Error = PadError.timeout("\(endpoint.label) とペアリングできませんでした")
         for attempt in 1...connectRetries {
+            report("\(endpoint.label) にペアリング中…(\(attempt)/\(connectRetries)回目)")
             do {
                 try await endpoint.pair(address)
                 try await endpoint.connect(address)
                 if try await endpoint.isConnected(address) {
-                    return
+                    if stabilityCheckDelay > 0 {
+                        try? await Task.sleep(nanoseconds: UInt64(stabilityCheckDelay * 1_000_000_000))
+                    }
+                    if try await endpoint.isConnected(address) {
+                        report("\(endpoint.label) への接続を確認しました")
+                        return
+                    }
+                    lastError = PadError.timeout("\(endpoint.label) への接続が瞬断しました")
+                } else {
+                    lastError = PadError.timeout("\(endpoint.label) への接続が確認できませんでした")
                 }
-                lastError = PadError.timeout("\(endpoint.label) への接続が確認できませんでした")
             } catch let error as PadError {
                 // SSH 到達不可はリトライしても無駄なので即座に中断
                 if case .unreachable = error { throw error }
@@ -123,8 +149,12 @@ public struct SwitchEngine: Sendable {
             } catch {
                 lastError = error
             }
+            Log.switch.info("pairAndConnect: \(endpoint.label, privacy: .public) 試行\(attempt)失敗 - \(describe(lastError), privacy: .public)")
             if attempt < connectRetries {
-                try? await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                let delay = retryDelay * Double(attempt)
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
             }
         }
         throw lastError
