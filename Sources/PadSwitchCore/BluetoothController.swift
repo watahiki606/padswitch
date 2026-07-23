@@ -134,12 +134,27 @@ public enum BluetoothController {
     /// 接続中に解除するとトラックパッドに解除が伝わり、発見可能モードに入る。
     /// これが切り替えの要で、受け取る側の Mac はこの直後にペアリングできる。
     /// 未接続のまま解除してもトラックパッドには伝わらず、発見可能にならない。
+    ///
+    /// `remove` は無線越しに非同期で伝わるため、呼び出し後すぐに返ると受け取る側の
+    /// 最初のペアリング試行が実際の切断より先に走ってしまう。実際に切断状態になる
+    /// (または上限時間が経つ)まで待ってから返す。
     public static func release(_ address: String) throws {
         let device = try device(for: address)
         if !device.isConnected() {
             _ = tryOpenConnection(device, within: 5)
         }
+        Log.switch.info("release: 解除開始 \(address, privacy: .public)")
         try unpair(device)
+        let confirmed = waitUntilDisconnected(device, within: 3)
+        Log.switch.info("release: 切断確認 \(confirmed ? "済み" : "タイムアウト", privacy: .public)")
+    }
+
+    static func waitUntilDisconnected(_ device: IOBluetoothDevice, within timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while device.isConnected(), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        return !device.isConnected()
     }
 
     /// 周辺の発見可能な Bluetooth デバイスを探索して返す。診断用。
